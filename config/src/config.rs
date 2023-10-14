@@ -12,6 +12,7 @@ use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::{path::PathBuf, process::exit};
+
 #[derive(Deserialize, Debug, Default)]
 pub struct Config {
     pub consensus_rpc: String,

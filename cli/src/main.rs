@@ -1,9 +1,3 @@
-use clap::Parser;
-use common::utils::hex_str_to_bytes;
-use dirs::home_dir;
-use env_logger::Env;
-use ethers::types::transaction;
-use eyre::{eyre, Result};
 use std::net::IpAddr;
 use std::{
     path::PathBuf,
@@ -11,80 +5,54 @@ use std::{
     str::FromStr,
     sync::{Arc, Mutex},
 };
+use std::error::Error;
+use std::process;
+use std::collections::HashSet;
 
+use clap::Parser;
 use client::{Client, ClientBuilder};
+use common::utils::hex_str_to_bytes;
 use config::{CliConfig, Config};
+use dirs::home_dir;
 use futures::executor::block_on;
-use log::{error, info};
+use tracing::{error, info};
+use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+use tracing_subscriber::FmtSubscriber;
 use ethers::{
     core::types::{Block, BlockId, Transaction, TransactionReceipt, H256, Address},
     providers::{Http, Middleware, Provider},
-    signers::Wallet,
+    // signers::Wallet,
     // trie::{MerklePatriciaTrie, Trie},
 };
+// use ethers::types::transaction;
+use eyre::{eyre, Result};
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
-//sogol addded: 
-    // Initialize the Ethereum provider URL and address public key from environment variables
-    let provider_url = std::env::var("PROVIDER_URI").unwrap_or_else(|_| "http://127.0.0.1:8545".to_string());
-    // let public_key = std::env::var("ETHEREUM_ADDRESS_PUBLIC_KEY").expect("ETHEREUM_ADDRESS_PUBLIC_KEY not set");
-    // Initialize the Ethereum provider URL from environment variable or use default
-    let provider = Provider::<Http>::try_from(provider_url.clone())?;
+async fn main() -> Result<(), Box<dyn Error>> {
+    let env_filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env()
+        .expect("invalid env filter");
 
-    let block_number = 9751182; // Replace with the desired block number
-    let blockwithtransactions=(provider.get_block_with_txs(block_number).await).unwrap().unwrap();
-    let transactions = blockwithtransactions.transactions;
+    let subscriber = FmtSubscriber::builder()
+        .with_env_filter(env_filter)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("subsriber set failed");
+
+    let provider_url = std::env::var("GOERLI_EXECUTION_RPC").unwrap_or_else(|_| "http://127.0.0.1:8545".to_string());
+    let provider = Provider::<Http>::try_from(provider_url)?;
+    // tracing::debug!("provider {:#?}", provider);
+    let block_number = 9751183.into(); // Replace with the desired block number
     // Fetch all transactions within the specified block
-    //let transactions = fetch_all_transactions(&provider, block_number).await?;
+    let transactions = fetch_all_transactions(provider.clone(), block_number).await;
+    tracing::info!("transactions {:#?}", transactions);
 
-    let addresses = transactions.iter()
-        .filter_map(|tx| {
-            let from = tx.from;
-            let to = tx.to.unwrap_or_default();
-            
-                Some(to)
-        })
-        .collect::<Vec<_>>();
-    println!(
-        "Addresses: {:?}, Number of Transactions: {}",
-        addresses,
-        transactions.len()
-    );
-    
-    let config = get_config();
+    // Fetch the block data, including the state root
+    let block = fetch_block_data(provider.clone(), block_number).await;
+    tracing::info!("block state root {:#?}", block.state_root);
 
-    // Create the Helios client with the specified target addresses
-    let mut client = match ClientBuilder::new().config(config).build() {
-        Ok(client) => client,
-        Err(err) => {
-            error!("{}", err);
-            exit(1);
-        }
-    };
-
-    if let Err(err) = client.start().await {
-        error!("{}", err);
-        exit(1);
-    }
-
-    let provider = Provider::<Http>::try_from(
-        provider_url,
-    )?;
-
-    let block_number = 9751182;
-    let block = provider
-        .get_block_with_txs(BlockId::Number(block_number.into()))
-        .await?;
-
-    let block = match block {
-        Some(block) => block,
-        None => return Err(eyre!("Block not found")),
-    };
-
-    let addresses = block
-        .transactions
+    let addresses = transactions
         .iter()
         .map(|tx| {
             let from = tx.from;
@@ -93,33 +61,23 @@ async fn main() -> Result<()> {
         })
         .flatten()
         .collect::<Vec<_>>();
-
-    println!(
-        "Addresses: {:?}, State root: {:?}",
-        addresses, block.state_root
-    );
-   
+    // Remove duplicate addresses
+    let addresses_deduped = dedup(&addresses);
+    tracing::info!("addresses {:#?}", addresses_deduped);
+    
     let config = get_config();
-
-    // Define your target addresses here
-    // We shouldnt need this any, as we pass the addresses as optional flags in the cli
-    // let target_addresses = vec![
-    //     Address::from_str("0xYourTargetAddress1").unwrap(),
-    //     Address::from_str("0xYourTargetAddress2").unwrap(),
-    // ];
-
 
     // Create the Helios client with the specified target addresses
     let mut client = match ClientBuilder::new().config(config).build() {
         Ok(client) => client,
         Err(err) => {
-            error!("{}", err);
+            error!(target: "helios::runner", error = %err);
             exit(1);
         }
     };
 
     if let Err(err) = client.start().await {
-        error!("{}", err);
+        error!(target: "helios::runner", error = %err);
         exit(1);
     }
 
@@ -138,11 +96,12 @@ fn register_shutdown_handler(client: Client) {
         let counter_value = *counter;
 
         if counter_value == 3 {
-            info!("forced shutdown");
+            info!(target: "helios::runner", "forced shutdown");
             exit(0);
         }
 
         info!(
+            target: "helios::runner",
             "shutting down... press ctrl-c {} more times to force quit",
             3 - counter_value
         );
@@ -179,12 +138,54 @@ fn get_config() -> Config {
 //     println!("Account: {:?}, State Root: {:?}", account_address, state_root);
 // }
 
-async fn fetch_all_transactions(provider:Provider<Http>, blocknumber:i32)->Vec<Transaction> {
-    let blockwithtransactions=(provider.get_block_with_txs(12).await).unwrap().unwrap();
-    let transactions = blockwithtransactions.transactions;
-    return transactions;
+async fn fetch_block_data(provider: Provider<Http>, block_number: BlockId) -> Block<H256> {
+    let block;
+    match provider.get_block(block_number).await {
+        Ok(x) => {
+            if let Some(_block) = x {
+                block = _block;
+            } else {
+                tracing::debug!("Received empty block");
+                process::exit(1);
+            }
+        },
+        Err(e) => {
+            tracing::debug!("Unable to get block {:#?}", e);
+            process::exit(1);
+        },
+    }
+    // println!("block {:?}", block);
 
+    return block;
 }
+
+async fn fetch_all_transactions(provider: Provider<Http>, block_number: BlockId) -> Vec<Transaction> {
+    let block_with_txs;
+    match provider.get_block_with_txs(block_number).await {
+        Ok(x) => {
+            if let Some(_block_with_txs) = x {
+                block_with_txs = _block_with_txs;
+            } else {
+                tracing::debug!("Received empty block with transactions");
+                process::exit(1);
+            }
+        },
+        Err(e) => {
+            tracing::debug!("Unable to get block with transactions {:#?}", e);
+            process::exit(1);
+        },
+    }
+    let transactions: Vec<Transaction> = block_with_txs.transactions;
+
+    return transactions;
+}
+
+fn dedup(vs: &Vec<Address>) -> Vec<Address> {
+    let hs = vs.iter().cloned().collect::<HashSet<Address>>();
+
+    hs.into_iter().collect()
+}
+
 #[derive(Parser)]
 #[clap(version, about)]
 /// Helios is a fast, secure, and portable light client for Ethereum

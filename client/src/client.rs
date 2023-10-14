@@ -8,10 +8,8 @@ use eyre::{eyre, Result};
 
 use common::types::{Block, BlockTag};
 use config::Config;
-// use ethers::prelude::FromStr;
 use execution::types::CallOpts;
-use log::{info, warn};
-// use std::str::FromStr;
+use tracing::{info, warn};
 
 use crate::node::Node;
 
@@ -259,7 +257,7 @@ impl Client {
             node,
             #[cfg(not(target_arch = "wasm32"))]
             rpc,
-            target_addresses: config.target_addresses.clone().unwrap(),
+            target_addresses: config.target_addresses.clone().unwrap_or_default(),
         })
     }
 

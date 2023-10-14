@@ -1,9 +1,8 @@
 #![allow(dead_code)]
 
-use std::str::FromStr;
+use std::{str::FromStr, sync::Arc};
 
-use ::client::Client;
-
+use ::client::{database::ConfigDB, Client};
 use ethers::{
     abi::Address,
     types::{H256, U256},
@@ -28,11 +27,13 @@ pub async fn fetch_mainnet_checkpoint() -> eyre::Result<H256> {
 /// The client is parameterized with a [FileDB](client::FileDB).
 /// It will also use the environment variable `MAINNET_EXECUTION_RPC` to connect to a mainnet node.
 /// The client will use `https://www.lightclientdata.org` as the consensus RPC.
-pub fn construct_mainnet_client(rt: &tokio::runtime::Runtime) -> eyre::Result<Client> {
+pub fn construct_mainnet_client(
+    rt: &tokio::runtime::Runtime,
+) -> eyre::Result<client::Client<ConfigDB>> {
     rt.block_on(inner_construct_mainnet_client())
 }
 
-pub async fn inner_construct_mainnet_client() -> eyre::Result<Client> {
+pub async fn inner_construct_mainnet_client() -> eyre::Result<client::Client<ConfigDB>> {
     let benchmark_rpc_url = std::env::var("MAINNET_EXECUTION_RPC")?;
     let mut client = client::ClientBuilder::new()
         .network(networks::Network::MAINNET)
@@ -44,7 +45,9 @@ pub async fn inner_construct_mainnet_client() -> eyre::Result<Client> {
     Ok(client)
 }
 
-pub async fn construct_mainnet_client_with_checkpoint(checkpoint: &str) -> eyre::Result<Client> {
+pub async fn construct_mainnet_client_with_checkpoint(
+    checkpoint: &str,
+) -> eyre::Result<client::Client<ConfigDB>> {
     let benchmark_rpc_url = std::env::var("MAINNET_EXECUTION_RPC")?;
     let mut client = client::ClientBuilder::new()
         .network(networks::Network::MAINNET)
@@ -74,7 +77,9 @@ pub fn construct_runtime() -> tokio::runtime::Runtime {
 /// The client is parameterized with a [FileDB](client::FileDB).
 /// It will also use the environment variable `GOERLI_EXECUTION_RPC` to connect to a mainnet node.
 /// The client will use `http://testing.prater.beacon-api.nimbus.team` as the consensus RPC.
-pub fn construct_goerli_client(rt: &tokio::runtime::Runtime) -> eyre::Result<Client> {
+pub fn construct_goerli_client(
+    rt: &tokio::runtime::Runtime,
+) -> eyre::Result<client::Client<ConfigDB>> {
     rt.block_on(async {
         let benchmark_rpc_url = std::env::var("GOERLI_EXECUTION_RPC")?;
         let mut client = client::ClientBuilder::new()
@@ -91,7 +96,7 @@ pub fn construct_goerli_client(rt: &tokio::runtime::Runtime) -> eyre::Result<Cli
 /// Gets the balance of the given address on mainnet.
 pub fn get_balance(
     rt: &tokio::runtime::Runtime,
-    client: Client,
+    client: Arc<Client<ConfigDB>>,
     address: &str,
 ) -> eyre::Result<U256> {
     rt.block_on(async {

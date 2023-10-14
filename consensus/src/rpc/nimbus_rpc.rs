@@ -1,28 +1,15 @@
 use async_trait::async_trait;
 use eyre::Result;
-use serde::de::DeserializeOwned;
 use std::cmp;
-use tracing::warn;
 
 use super::ConsensusRpc;
 use crate::constants::MAX_REQUEST_LIGHT_CLIENT_UPDATES;
 use crate::types::*;
-use backoff::future::retry_notify;
-use backoff::ExponentialBackoff;
 use common::errors::RpcError;
 
 #[derive(Debug)]
 pub struct NimbusRpc {
     rpc: String,
-}
-
-async fn get<R: DeserializeOwned>(req: &str) -> Result<R, reqwest::Error> {
-    retry_notify(
-        ExponentialBackoff::default(),
-        || async { Ok(reqwest::get(req).await?.json::<R>().await?) },
-        |e, dur| warn!(target: "helios::nimbus_rpc",  "rpc error occurred at {:?}: {}", dur, e),
-    )
-    .await
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -41,7 +28,15 @@ impl ConsensusRpc for NimbusRpc {
             self.rpc, root_hex
         );
 
-        let res: BootstrapResponse = get(&req).await.map_err(|e| RpcError::new("bootstrap", e))?;
+        let client = reqwest::Client::new();
+        let res = client
+            .get(req)
+            .send()
+            .await
+            .map_err(|e| RpcError::new("bootstrap", e))?
+            .json::<BootstrapResponse>()
+            .await
+            .map_err(|e| RpcError::new("bootstrap", e))?;
 
         Ok(res.data)
     }
@@ -53,14 +48,25 @@ impl ConsensusRpc for NimbusRpc {
             self.rpc, period, count
         );
 
-        let res: UpdateResponse = get(&req).await.map_err(|e| RpcError::new("updates", e))?;
+        let client = reqwest::Client::new();
+        let res = client
+            .get(req)
+            .send()
+            .await
+            .map_err(|e| RpcError::new("updates", e))?
+            .json::<UpdateResponse>()
+            .await
+            .map_err(|e| RpcError::new("updates", e))?;
 
         Ok(res.into_iter().map(|d| d.data).collect())
     }
 
     async fn get_finality_update(&self) -> Result<FinalityUpdate> {
         let req = format!("{}/eth/v1/beacon/light_client/finality_update", self.rpc);
-        let res: FinalityUpdateResponse = get(&req)
+        let res = reqwest::get(req)
+            .await
+            .map_err(|e| RpcError::new("finality_update", e))?
+            .json::<FinalityUpdateResponse>()
             .await
             .map_err(|e| RpcError::new("finality_update", e))?;
 
@@ -69,7 +75,10 @@ impl ConsensusRpc for NimbusRpc {
 
     async fn get_optimistic_update(&self) -> Result<OptimisticUpdate> {
         let req = format!("{}/eth/v1/beacon/light_client/optimistic_update", self.rpc);
-        let res: OptimisticUpdateResponse = get(&req)
+        let res = reqwest::get(req)
+            .await
+            .map_err(|e| RpcError::new("optimistic_update", e))?
+            .json::<OptimisticUpdateResponse>()
             .await
             .map_err(|e| RpcError::new("optimistic_update", e))?;
 
@@ -78,14 +87,24 @@ impl ConsensusRpc for NimbusRpc {
 
     async fn get_block(&self, slot: u64) -> Result<BeaconBlock> {
         let req = format!("{}/eth/v2/beacon/blocks/{}", self.rpc, slot);
-        let res: BeaconBlockResponse = get(&req).await.map_err(|e| RpcError::new("blocks", e))?;
+        let res = reqwest::get(req)
+            .await
+            .map_err(|e| RpcError::new("blocks", e))?
+            .json::<BeaconBlockResponse>()
+            .await
+            .map_err(|e| RpcError::new("blocks", e))?;
 
         Ok(res.data.message)
     }
 
     async fn chain_id(&self) -> Result<u64> {
         let req = format!("{}/eth/v1/config/spec", self.rpc);
-        let res: SpecResponse = get(&req).await.map_err(|e| RpcError::new("spec", e))?;
+        let res = reqwest::get(req)
+            .await
+            .map_err(|e| RpcError::new("spec", e))?
+            .json::<SpecResponse>()
+            .await
+            .map_err(|e| RpcError::new("spec", e))?;
 
         Ok(res.data.chain_id.into())
     }

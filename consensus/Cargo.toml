@@ -25,12 +25,11 @@ serde_json.workspace = true
 eyre.workspace = true
 hex.workspace = true
 bytes.workspace = true
-tracing.workspace = true
+log.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 superstruct.workspace = true
 wasm-timer.workspace = true
-backoff.workspace = true
 
 common = { path = "../common" }
 config = { path = "../config" }

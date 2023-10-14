@@ -10,10 +10,11 @@ hex.workspace = true
 ssz-rs.workspace = true
 ethers.workspace = true
 futures.workspace = true
-tracing.workspace = true
+log.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 wasm-timer.workspace = true
+lru = "0.11.0"
 
 common = { path = "../common" }
 consensus = { path = "../consensus" }
@@ -26,4 +27,3 @@ jsonrpsee = { version = "0.15.1", features = ["full"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-timers = "0.2.6"
 wasm-bindgen-futures = "0.4.33"
-

@@ -1,11 +1,44 @@
-use serde::Serialize;
+use std::str::FromStr;
 
-use crate::{bytes_serialize, ChainConfig, Fork, Forks};
 use common::utils::hex_str_to_bytes;
+use eyre::Result;
+use serde::{Deserialize, Serialize};
+use strum::{Display, EnumIter};
 
+use crate::base::BaseConfig;
+use crate::types::{ChainConfig, Fork, Forks};
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    EnumIter,
+    Display,
+    Hash,
+    Eq,
+    PartialEq,
+    PartialOrd,
+    Ord,
+)]
 pub enum Network {
     MAINNET,
     GOERLI,
+    SEPOLIA,
+}
+
+impl FromStr for Network {
+    type Err = eyre::Report;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "mainnet" => Ok(Self::MAINNET),
+            "goerli" => Ok(Self::GOERLI),
+            "sepolia" => Ok(Self::SEPOLIA),
+            _ => Err(eyre::eyre!("network not recognized")),
+        }
+    }
 }
 
 impl Network {
@@ -13,27 +46,23 @@ impl Network {
         match self {
             Self::MAINNET => mainnet(),
             Self::GOERLI => goerli(),
+            Self::SEPOLIA => sepolia(),
+        }
+    }
+
+    pub fn from_chain_id(id: u64) -> Result<Self> {
+        match id {
+            1 => Ok(Network::MAINNET),
+            5 => Ok(Network::GOERLI),
+            _ => Err(eyre::eyre!("chain id not known")),
         }
     }
 }
 
-#[derive(Serialize, Default)]
-pub struct BaseConfig {
-    pub rpc_port: u16,
-    pub consensus_rpc: Option<String>,
-    #[serde(
-        deserialize_with = "bytes_deserialize",
-        serialize_with = "bytes_serialize"
-    )]
-    pub checkpoint: Vec<u8>,
-    pub chain: ChainConfig,
-    pub forks: Forks,
-}
-
 pub fn mainnet() -> BaseConfig {
     BaseConfig {
-        checkpoint: hex_str_to_bytes(
-            "0x428ce0b5f5bbed1fc2b3feb5d4152ae0fe98a80b1bfa8de36681868e81e9222a",
+        default_checkpoint: hex_str_to_bytes(
+            "0x69e3bb0e44b707636ff2c1d3385b20c21013c95f867c296c7ee84960edcbd103",
         )
         .unwrap(),
         rpc_port: 8545,
@@ -59,14 +88,20 @@ pub fn mainnet() -> BaseConfig {
                 epoch: 144896,
                 fork_version: hex_str_to_bytes("0x02000000").unwrap(),
             },
+            capella: Fork {
+                epoch: 194048,
+                fork_version: hex_str_to_bytes("0x03000000").unwrap(),
+            },
         },
+        max_checkpoint_age: 1_209_600, // 14 days
+        ..std::default::Default::default()
     }
 }
 
 pub fn goerli() -> BaseConfig {
     BaseConfig {
-        checkpoint: hex_str_to_bytes(
-            "0xd4344682866dbede543395ecf5adf9443a27f423a4b00f270458e7932686ced1",
+        default_checkpoint: hex_str_to_bytes(
+            "0x428474ba0c1ce5049efe4324d503f69f0370fae2095954db4864c57097c90574",
         )
         .unwrap(),
         rpc_port: 8545,
@@ -92,6 +127,51 @@ pub fn goerli() -> BaseConfig {
                 epoch: 112260,
                 fork_version: hex_str_to_bytes("0x02001020").unwrap(),
             },
+            capella: Fork {
+                epoch: 162304,
+                fork_version: hex_str_to_bytes("0x03001020").unwrap(),
+            },
         },
+        max_checkpoint_age: 1_209_600, // 14 days
+        ..std::default::Default::default()
+    }
+}
+
+pub fn sepolia() -> BaseConfig {
+    BaseConfig {
+        default_checkpoint: hex_str_to_bytes(
+            "0x362414b2939270da11c114792cdb7571faba47866fa9d8fbf7468cb121905c40",
+        )
+        .unwrap(),
+        rpc_port: 8545,
+        consensus_rpc: None,
+        chain: ChainConfig {
+            chain_id: 11155111,
+            genesis_time: 1655733600,
+            genesis_root: hex_str_to_bytes(
+                "0xd8ea171f3c94aea21ebc42a1ed61052acf3f9209c00e4efbaaddac09ed9b8078",
+            )
+            .unwrap(),
+        },
+        forks: Forks {
+            genesis: Fork {
+                epoch: 0,
+                fork_version: hex_str_to_bytes("0x90000069").unwrap(),
+            },
+            altair: Fork {
+                epoch: 50,
+                fork_version: hex_str_to_bytes("0x90000070").unwrap(),
+            },
+            bellatrix: Fork {
+                epoch: 100,
+                fork_version: hex_str_to_bytes("0x90000071").unwrap(),
+            },
+            capella: Fork {
+                epoch: 56832,
+                fork_version: hex_str_to_bytes("0x90000072").unwrap(),
+            },
+        },
+        max_checkpoint_age: 1_209_600, // 14 days
+        ..std::default::Default::default()
     }
 }

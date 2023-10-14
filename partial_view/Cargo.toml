@@ -1,0 +1,23 @@
+[package]
+name = "partial_view"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ethers.workspace = true
+eyre.workspace = true
+serde.workspace = true
+futures.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+clap = { version = "3.2.18", features = ["derive", "env"] }
+ctrlc = "3.2.3"
+dirs = "4.0.0"
+rmp-serde = "1.1.2"
+serde_bytes = "0.11.12"
+
+client = { path = "../client" }
+config = { path = "../config" }
+common = { path = "../common" }
+consensus = { path = "../consensus" }

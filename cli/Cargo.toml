@@ -1,24 +1,24 @@
-cargo-features = ["different-binary-name"]
-
 [package]
 name = "cli"
-version = "0.1.0"
+version = "0.4.1"
 edition = "2021"
 
 [[bin]]
-name = "cli"
-filename = "helios"
+name = "helios"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio.workspace = true
+ethers.workspace = true
+eyre.workspace = true
+tracing.workspace = true
+futures.workspace = true
+
 clap = { version = "3.2.18", features = ["derive", "env"] }
-eyre = "0.6.8"
 dirs = "4.0.0"
-env_logger = "0.9.0"
-log = "0.4.17"
 ctrlc = "3.2.3"
-futures = "0.3.23"
+lru = "0.11.0"
+tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 
 client = { path = "../client" }
 config = { path = "../config" }

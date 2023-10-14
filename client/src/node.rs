@@ -1,160 +1,124 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use ethers::prelude::{Address, U256};
-use ethers::types::{Transaction, TransactionReceipt, H256};
+use ethers::types::{
+    Filter, Log, SyncProgress, SyncingStatus, Transaction, TransactionReceipt, H256,
+};
 use eyre::{eyre, Result};
+use wasm_timer::{SystemTime, UNIX_EPOCH};
 
-use common::errors::BlockNotFoundError;
-use common::types::BlockTag;
+use common::types::{Block, BlockTag};
 use config::Config;
+use execution::state::State;
+
+use consensus::database::FileDB;
 use consensus::rpc::nimbus_rpc::NimbusRpc;
-use consensus::types::{ExecutionPayload, Header};
 use consensus::ConsensusClient;
 use execution::evm::Evm;
 use execution::rpc::http_rpc::HttpRpc;
-use execution::types::{CallOpts, ExecutionBlock};
+use execution::types::CallOpts;
 use execution::ExecutionClient;
 
+// use partial_view::*;
+
+use crate::errors::NodeError;
+
 pub struct Node {
-    consensus: ConsensusClient<NimbusRpc>,
-    execution: Arc<ExecutionClient<HttpRpc>>,
-    config: Arc<Config>,
-    payloads: BTreeMap<u64, ExecutionPayload>,
-    finalized_payloads: BTreeMap<u64, ExecutionPayload>,
-    history_size: usize,
+    pub consensus: ConsensusClient<NimbusRpc, FileDB>,
+    pub execution: Arc<ExecutionClient<HttpRpc>>,
+    pub config: Arc<Config>,
+    pub history_size: usize,
 }
 
 impl Node {
-    pub fn new(config: Arc<Config>) -> Result<Self> {
+    pub fn new(config: Arc<Config>) -> Result<Self, NodeError> {
         let consensus_rpc = &config.consensus_rpc;
-        let checkpoint_hash = &config.checkpoint;
         let execution_rpc = &config.execution_rpc;
 
-        let consensus = ConsensusClient::new(consensus_rpc, checkpoint_hash, config.clone())?;
-        let execution = Arc::new(ExecutionClient::new(execution_rpc)?);
+        let mut consensus = ConsensusClient::new(consensus_rpc, config.clone())
+            .map_err(NodeError::ConsensusClientCreationError)?;
 
-        let payloads = BTreeMap::new();
-        let finalized_payloads = BTreeMap::new();
+        let block_recv = consensus.block_recv.take().unwrap();
+        let finalized_block_recv = consensus.finalized_block_recv.take().unwrap();
+
+        let state = State::new(block_recv, finalized_block_recv, 256);
+        let execution = Arc::new(
+            ExecutionClient::new(execution_rpc, state)
+                .map_err(NodeError::ExecutionClientCreationError)?,
+        );
 
         Ok(Node {
             consensus,
             execution,
             config,
-            payloads,
-            finalized_payloads,
             history_size: 64,
         })
     }
 
-    pub async fn sync(&mut self) -> Result<()> {
-        self.consensus.sync().await?;
-        self.update_payloads().await
+    pub async fn call(&self, opts: &CallOpts, block: BlockTag) -> Result<Vec<u8>, NodeError> {
+        self.check_blocktag_age(&block).await?;
+
+        let mut evm = Evm::new(self.execution.clone(), self.chain_id(), block);
+
+        evm.call(opts).await.map_err(NodeError::ExecutionEvmError)
     }
 
-    pub async fn advance(&mut self) -> Result<()> {
-        self.consensus.advance().await?;
-        self.update_payloads().await
+    pub async fn estimate_gas(&self, opts: &CallOpts) -> Result<u64, NodeError> {
+        self.check_head_age().await?;
+
+        let mut evm = Evm::new(self.execution.clone(), self.chain_id(), BlockTag::Latest);
+
+        evm.estimate_gas(opts)
+            .await
+            .map_err(NodeError::ExecutionEvmError)
     }
 
-    pub fn duration_until_next_update(&self) -> Duration {
-        self.consensus
-            .duration_until_next_update()
-            .to_std()
-            .unwrap()
-    }
+    pub async fn get_balance(&self, address: &Address, tag: BlockTag) -> Result<U256> {
+        self.check_blocktag_age(&tag).await?;
 
-    async fn update_payloads(&mut self) -> Result<()> {
-        let latest_header = self.consensus.get_header();
-        let latest_payload = self
-            .consensus
-            .get_execution_payload(&Some(latest_header.slot))
-            .await?;
-
-        let finalized_header = self.consensus.get_finalized_header();
-        let finalized_payload = self
-            .consensus
-            .get_execution_payload(&Some(finalized_header.slot))
-            .await?;
-
-        self.payloads
-            .insert(latest_payload.block_number, latest_payload);
-        self.payloads
-            .insert(finalized_payload.block_number, finalized_payload.clone());
-        self.finalized_payloads
-            .insert(finalized_payload.block_number, finalized_payload);
-
-        while self.payloads.len() > self.history_size {
-            self.payloads.pop_first();
-        }
-
-        // only save one finalized block per epoch
-        // finality updates only occur on epoch boundries
-        while self.finalized_payloads.len() > usize::max(self.history_size / 32, 1) {
-            self.finalized_payloads.pop_first();
-        }
-
-        Ok(())
-    }
-
-    pub async fn call(&self, opts: &CallOpts, block: BlockTag) -> Result<Vec<u8>> {
-        self.check_blocktag_age(&block)?;
-
-        let payload = self.get_payload(block)?;
-        let mut evm = Evm::new(
-            self.execution.clone(),
-            &payload,
-            &self.payloads,
-            self.chain_id(),
-        );
-        evm.call(opts).await
-    }
-
-    pub async fn estimate_gas(&self, opts: &CallOpts) -> Result<u64> {
-        self.check_head_age()?;
-
-        let payload = self.get_payload(BlockTag::Latest)?;
-        let mut evm = Evm::new(
-            self.execution.clone(),
-            &payload,
-            &self.payloads,
-            self.chain_id(),
-        );
-        evm.estimate_gas(opts).await
-    }
-
-    pub async fn get_balance(&self, address: &Address, block: BlockTag) -> Result<U256> {
-        self.check_blocktag_age(&block)?;
-
-        let payload = self.get_payload(block)?;
-        let account = self.execution.get_account(&address, None, payload).await?;
+        let account = self.execution.get_account(address, None, tag).await?;
         Ok(account.balance)
     }
 
-    pub async fn get_nonce(&self, address: &Address, block: BlockTag) -> Result<u64> {
-        self.check_blocktag_age(&block)?;
+    pub async fn get_nonce(&self, address: &Address, tag: BlockTag) -> Result<u64> {
+        self.check_blocktag_age(&tag).await?;
 
-        let payload = self.get_payload(block)?;
-        let account = self.execution.get_account(&address, None, payload).await?;
+        let account = self.execution.get_account(address, None, tag).await?;
         Ok(account.nonce)
     }
 
-    pub async fn get_code(&self, address: &Address, block: BlockTag) -> Result<Vec<u8>> {
-        self.check_blocktag_age(&block)?;
+    pub async fn get_block_transaction_count_by_hash(&self, hash: &H256) -> Result<u64> {
+        let block = self.execution.get_block_by_hash(*hash, false).await?;
+        let transaction_count = block.transactions.hashes().len();
 
-        let payload = self.get_payload(block)?;
-        let account = self.execution.get_account(&address, None, payload).await?;
+        Ok(transaction_count as u64)
+    }
+
+    pub async fn get_block_transaction_count_by_number(&self, tag: BlockTag) -> Result<u64> {
+        let block = self.execution.get_block(tag, false).await?;
+        let transaction_count = block.transactions.hashes().len();
+
+        Ok(transaction_count as u64)
+    }
+
+    pub async fn get_code(&self, address: &Address, tag: BlockTag) -> Result<Vec<u8>> {
+        self.check_blocktag_age(&tag).await?;
+
+        let account = self.execution.get_account(address, None, tag).await?;
         Ok(account.code)
     }
 
-    pub async fn get_storage_at(&self, address: &Address, slot: H256) -> Result<U256> {
-        self.check_head_age()?;
+    pub async fn get_storage_at(
+        &self,
+        address: &Address,
+        slot: H256,
+        tag: BlockTag,
+    ) -> Result<U256> {
+        self.check_head_age().await?;
 
-        let payload = self.get_payload(BlockTag::Latest)?;
         let account = self
             .execution
-            .get_account(address, Some(&[slot]), payload)
+            .get_account(address, Some(&[slot]), tag)
             .await?;
 
         let value = account.slots.get(&slot);
@@ -164,7 +128,7 @@ impl Node {
         }
     }
 
-    pub async fn send_raw_transaction(&self, bytes: &Vec<u8>) -> Result<H256> {
+    pub async fn send_raw_transaction(&self, bytes: &[u8]) -> Result<H256> {
         self.execution.send_raw_transaction(bytes).await
     }
 
@@ -172,23 +136,53 @@ impl Node {
         &self,
         tx_hash: &H256,
     ) -> Result<Option<TransactionReceipt>> {
+        self.execution.get_transaction_receipt(tx_hash).await
+    }
+
+    pub async fn get_transaction_by_hash(&self, tx_hash: &H256) -> Option<Transaction> {
+        self.execution.get_transaction(*tx_hash).await
+    }
+
+    pub async fn get_transaction_by_block_hash_and_index(
+        &self,
+        hash: &H256,
+        index: u64,
+    ) -> Option<Transaction> {
         self.execution
-            .get_transaction_receipt(tx_hash, &self.payloads)
+            .get_transaction_by_block_hash_and_index(*hash, index)
             .await
     }
 
-    pub async fn get_transaction_by_hash(&self, tx_hash: &H256) -> Result<Option<Transaction>> {
-        self.execution
-            .get_transaction(tx_hash, &self.payloads)
-            .await
+    pub async fn get_logs(&self, filter: &Filter) -> Result<Vec<Log>> {
+        self.execution.get_logs(filter).await
+    }
+
+    pub async fn get_filter_changes(&self, filter_id: &U256) -> Result<Vec<Log>> {
+        self.execution.get_filter_changes(filter_id).await
+    }
+
+    pub async fn uninstall_filter(&self, filter_id: &U256) -> Result<bool> {
+        self.execution.uninstall_filter(filter_id).await
+    }
+
+    pub async fn get_new_filter(&self, filter: &Filter) -> Result<U256> {
+        self.execution.get_new_filter(filter).await
+    }
+
+    pub async fn get_new_block_filter(&self) -> Result<U256> {
+        self.execution.get_new_block_filter().await
+    }
+
+    pub async fn get_new_pending_transaction_filter(&self) -> Result<U256> {
+        self.execution.get_new_pending_transaction_filter().await
     }
 
     // assumes tip of 1 gwei to prevent having to prove out every tx in the block
-    pub fn get_gas_price(&self) -> Result<U256> {
-        self.check_head_age()?;
+    pub async fn get_gas_price(&self) -> Result<U256> {
+        self.check_head_age().await?;
 
-        let payload = self.get_payload(BlockTag::Latest)?;
-        let base_fee = U256::from_little_endian(&payload.base_fee_per_gas.to_bytes_le());
+        let block = self.execution.get_block(BlockTag::Latest, false).await?;
+        let base_fee = block.base_fee_per_gas;
         let tip = U256::from(10_u64.pow(9));
         Ok(base_fee + tip)
     }
@@ -199,48 +193,28 @@ impl Node {
         Ok(tip)
     }
 
-    pub fn get_block_number(&self) -> Result<u64> {
-        self.check_head_age()?;
+    pub async fn get_block_number(&self) -> Result<U256> {
+        self.check_head_age().await?;
 
-        let payload = self.get_payload(BlockTag::Latest)?;
-        Ok(payload.block_number)
+        let block = self.execution.get_block(BlockTag::Latest, false).await?;
+        Ok(U256::from(block.number.as_u64()))
     }
 
-    pub async fn get_block_by_number(
-        &self,
-        block: BlockTag,
-        full_tx: bool,
-    ) -> Result<Option<ExecutionBlock>> {
-        self.check_blocktag_age(&block)?;
+    pub async fn get_block_by_number(&self, tag: BlockTag, full_tx: bool) -> Result<Option<Block>> {
+        self.check_blocktag_age(&tag).await?;
 
-        match self.get_payload(block) {
-            Ok(payload) => self
-                .execution
-                .get_block(payload, full_tx)
-                .await
-                .map(|b| Some(b)),
+        match self.execution.get_block(tag, full_tx).await {
+            Ok(block) => Ok(Some(block)),
             Err(_) => Ok(None),
         }
     }
 
-    pub async fn get_block_by_hash(
-        &self,
-        hash: &Vec<u8>,
-        full_tx: bool,
-    ) -> Result<Option<ExecutionBlock>> {
-        let payloads = self
-            .payloads
-            .iter()
-            .filter(|entry| &entry.1.block_hash.to_vec() == hash)
-            .collect::<Vec<(&u64, &ExecutionPayload)>>();
+    pub async fn get_block_by_hash(&self, hash: &H256, full_tx: bool) -> Result<Option<Block>> {
+        let block = self.execution.get_block_by_hash(*hash, full_tx).await;
 
-        if let Some(payload_entry) = payloads.get(0) {
-            self.execution
-                .get_block(payload_entry.1, full_tx)
-                .await
-                .map(|b| Some(b))
-        } else {
-            Ok(None)
+        match block {
+            Ok(block) => Ok(Some(block)),
+            Err(_) => Ok(None),
         }
     }
 
@@ -248,49 +222,70 @@ impl Node {
         self.config.chain.chain_id
     }
 
-    pub fn get_header(&self) -> Result<Header> {
-        self.check_head_age()?;
-        Ok(self.consensus.get_header().clone())
-    }
+    pub async fn syncing(&self) -> Result<SyncingStatus> {
+        if self.check_head_age().await.is_ok() {
+            Ok(SyncingStatus::IsFalse)
+        } else {
+            let starting_block = 0.into();
+            let latest_synced_block = self.get_block_number().await.unwrap_or(starting_block);
+            let highest_block = self.consensus.expected_current_slot();
 
-    pub fn get_last_checkpoint(&self) -> Option<Vec<u8>> {
-        self.consensus.last_checkpoint.clone()
-    }
+            Ok(SyncingStatus::IsSyncing(Box::new(SyncProgress {
+                current_block: latest_synced_block.as_u64().into(),
+                highest_block: highest_block.into(),
+                starting_block: starting_block.as_u64().into(),
 
-    fn get_payload(&self, block: BlockTag) -> Result<&ExecutionPayload> {
-        match block {
-            BlockTag::Latest => {
-                let payload = self.payloads.last_key_value();
-                Ok(payload.ok_or(BlockNotFoundError::new(BlockTag::Latest))?.1)
-            }
-            BlockTag::Finalized => {
-                let payload = self.finalized_payloads.last_key_value();
-                Ok(payload
-                    .ok_or(BlockNotFoundError::new(BlockTag::Finalized))?
-                    .1)
-            }
-            BlockTag::Number(num) => {
-                let payload = self.payloads.get(&num);
-                payload.ok_or(BlockNotFoundError::new(BlockTag::Number(num)).into())
-            }
+                // these fields don't make sense for helios
+                pulled_states: None,
+                known_states: None,
+                healed_bytecode_bytes: None,
+                healed_bytecodes: None,
+                healed_trienode_bytes: None,
+                healed_trienodes: None,
+                healing_bytecode: None,
+                healing_trienodes: None,
+                synced_account_bytes: None,
+                synced_accounts: None,
+                synced_bytecode_bytes: None,
+                synced_bytecodes: None,
+                synced_storage: None,
+                synced_storage_bytes: None,
+            })))
         }
     }
 
-    fn check_head_age(&self) -> Result<()> {
-        let synced_slot = self.consensus.get_header().slot;
-        let expected_slot = self.consensus.expected_current_slot();
-        let slot_delay = expected_slot - synced_slot;
+    pub async fn get_coinbase(&self) -> Result<Address> {
+        self.check_head_age().await?;
 
-        if slot_delay > 10 {
-            return Err(eyre!("out of sync"));
+        let block = self.execution.get_block(BlockTag::Latest, false).await?;
+        Ok(block.miner)
+    }
+
+    async fn check_head_age(&self) -> Result<(), NodeError> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let block_timestap = self
+            .execution
+            .get_block(BlockTag::Latest, false)
+            .await
+            .map_err(|_| NodeError::OutOfSync(timestamp))?
+            .timestamp
+            .as_u64();
+
+        let delay = timestamp.checked_sub(block_timestap).unwrap_or_default();
+        if delay > 60 {
+            return Err(NodeError::OutOfSync(delay));
         }
 
         Ok(())
     }
 
-    fn check_blocktag_age(&self, block: &BlockTag) -> Result<()> {
+    async fn check_blocktag_age(&self, block: &BlockTag) -> Result<(), NodeError> {
         match block {
-            BlockTag::Latest => self.check_head_age(),
+            BlockTag::Latest => self.check_head_age().await,
             BlockTag::Finalized => Ok(()),
             BlockTag::Number(_) => Ok(()),
         }

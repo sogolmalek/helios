@@ -1,11 +1,11 @@
 use ethers::{
     abi::AbiEncode,
-    types::{Address, Transaction, TransactionReceipt, H256},
+    types::{Address, Filter, Log, SyncingStatus, Transaction, TransactionReceipt, H256, U256},
 };
 use eyre::Result;
-use log::info;
+use std::net::{IpAddr, Ipv4Addr};
 use std::{fmt::Display, net::SocketAddr, str::FromStr, sync::Arc};
-use tokio::sync::RwLock;
+use tracing::info;
 
 use jsonrpsee::{
     core::{async_trait, server::rpc_module::Methods, Error},
@@ -13,39 +13,43 @@ use jsonrpsee::{
     proc_macros::rpc,
 };
 
-use crate::node::Node;
+use crate::{errors::NodeError, node::Node};
 
 use common::{
-    types::BlockTag,
+    types::{Block, BlockTag},
     utils::{hex_str_to_bytes, u64_to_hex_string},
 };
-use execution::types::{CallOpts, ExecutionBlock};
+use execution::types::CallOpts;
 
 pub struct Rpc {
-    node: Arc<RwLock<Node>>,
+    node: Arc<Node>,
     handle: Option<HttpServerHandle>,
-    port: u16,
+    address: SocketAddr,
 }
 
 impl Rpc {
-    pub fn new(node: Arc<RwLock<Node>>, port: u16) -> Self {
+    pub fn new(node: Arc<Node>, ip: Option<IpAddr>, port: Option<u16>) -> Self {
+        let address = SocketAddr::new(
+            ip.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            port.unwrap_or(0),
+        );
         Rpc {
             node,
             handle: None,
-            port,
+            address,
         }
     }
 
     pub async fn start(&mut self) -> Result<SocketAddr> {
         let rpc_inner = RpcInner {
             node: self.node.clone(),
-            port: self.port,
+            address: self.address,
         };
 
         let (handle, addr) = start(rpc_inner).await?;
         self.handle = Some(handle);
 
-        info!("rpc server started at {}", addr);
+        info!(target: "helios::rpc", "rpc server started at {}", addr);
 
         Ok(addr)
     }
@@ -57,6 +61,11 @@ trait EthRpc {
     async fn get_balance(&self, address: &str, block: BlockTag) -> Result<String, Error>;
     #[method(name = "getTransactionCount")]
     async fn get_transaction_count(&self, address: &str, block: BlockTag) -> Result<String, Error>;
+    #[method(name = "getBlockTransactionCountByHash")]
+    async fn get_block_transaction_count_by_hash(&self, hash: H256) -> Result<String, Error>;
+    #[method(name = "getBlockTransactionCountByNumber")]
+    async fn get_block_transaction_count_by_number(&self, block: BlockTag)
+        -> Result<String, Error>;
     #[method(name = "getCode")]
     async fn get_code(&self, address: &str, block: BlockTag) -> Result<String, Error>;
     #[method(name = "call")]
@@ -76,22 +85,47 @@ trait EthRpc {
         &self,
         block: BlockTag,
         full_tx: bool,
-    ) -> Result<Option<ExecutionBlock>, Error>;
+    ) -> Result<Option<Block>, Error>;
     #[method(name = "getBlockByHash")]
-    async fn get_block_by_hash(
-        &self,
-        hash: &str,
-        full_tx: bool,
-    ) -> Result<Option<ExecutionBlock>, Error>;
+    async fn get_block_by_hash(&self, hash: H256, full_tx: bool) -> Result<Option<Block>, Error>;
     #[method(name = "sendRawTransaction")]
     async fn send_raw_transaction(&self, bytes: &str) -> Result<String, Error>;
     #[method(name = "getTransactionReceipt")]
     async fn get_transaction_receipt(
         &self,
-        hash: &str,
+        hash: H256,
     ) -> Result<Option<TransactionReceipt>, Error>;
     #[method(name = "getTransactionByHash")]
-    async fn get_transaction_by_hash(&self, hash: &str) -> Result<Option<Transaction>, Error>;
+    async fn get_transaction_by_hash(&self, hash: H256) -> Result<Option<Transaction>, Error>;
+    #[method(name = "getTransactionByBlockHashAndIndex")]
+    async fn get_transaction_by_block_hash_and_index(
+        &self,
+        hash: H256,
+        index: u64,
+    ) -> Result<Option<Transaction>, Error>;
+    #[method(name = "getLogs")]
+    async fn get_logs(&self, filter: Filter) -> Result<Vec<Log>, Error>;
+    #[method(name = "getFilterChanges")]
+    async fn get_filter_changes(&self, filter_id: U256) -> Result<Vec<Log>, Error>;
+    #[method(name = "uninstallFilter")]
+    async fn uninstall_filter(&self, filter_id: U256) -> Result<bool, Error>;
+    #[method(name = "getNewFilter")]
+    async fn get_new_filter(&self, filter: Filter) -> Result<U256, Error>;
+    #[method(name = "getNewBlockFilter")]
+    async fn get_new_block_filter(&self) -> Result<U256, Error>;
+    #[method(name = "getNewPendingTransactionFilter")]
+    async fn get_new_pending_transaction_filter(&self) -> Result<U256, Error>;
+    #[method(name = "getStorageAt")]
+    async fn get_storage_at(
+        &self,
+        address: &str,
+        slot: H256,
+        block: BlockTag,
+    ) -> Result<String, Error>;
+    #[method(name = "coinbase")]
+    async fn coinbase(&self) -> Result<Address, Error>;
+    #[method(name = "syncing")]
+    async fn syncing(&self) -> Result<SyncingStatus, Error>;
 }
 
 #[rpc(client, server, namespace = "net")]
@@ -102,131 +136,185 @@ trait NetRpc {
 
 #[derive(Clone)]
 struct RpcInner {
-    node: Arc<RwLock<Node>>,
-    port: u16,
+    node: Arc<Node>,
+    address: SocketAddr,
 }
 
 #[async_trait]
 impl EthRpcServer for RpcInner {
     async fn get_balance(&self, address: &str, block: BlockTag) -> Result<String, Error> {
         let address = convert_err(Address::from_str(address))?;
-        let node = self.node.read().await;
-        let balance = convert_err(node.get_balance(&address, block).await)?;
+        let balance = convert_err(self.node.get_balance(&address, block).await)?;
 
-        Ok(balance.encode_hex())
+        Ok(format_hex(&balance))
     }
 
     async fn get_transaction_count(&self, address: &str, block: BlockTag) -> Result<String, Error> {
         let address = convert_err(Address::from_str(address))?;
-        let node = self.node.read().await;
-        let nonce = convert_err(node.get_nonce(&address, block).await)?;
+        let nonce = convert_err(self.node.get_nonce(&address, block).await)?;
 
-        Ok(nonce.encode_hex())
+        Ok(format!("0x{nonce:x}"))
+    }
+
+    async fn get_block_transaction_count_by_hash(&self, hash: H256) -> Result<String, Error> {
+        let transaction_count =
+            convert_err(self.node.get_block_transaction_count_by_hash(&hash).await)?;
+        Ok(u64_to_hex_string(transaction_count))
+    }
+
+    async fn get_block_transaction_count_by_number(
+        &self,
+        block: BlockTag,
+    ) -> Result<String, Error> {
+        let transaction_count =
+            convert_err(self.node.get_block_transaction_count_by_number(block).await)?;
+        Ok(u64_to_hex_string(transaction_count))
     }
 
     async fn get_code(&self, address: &str, block: BlockTag) -> Result<String, Error> {
         let address = convert_err(Address::from_str(address))?;
-        let node = self.node.read().await;
-        let code = convert_err(node.get_code(&address, block).await)?;
+        let code = convert_err(self.node.get_code(&address, block).await)?;
 
-        Ok(hex::encode(code))
+        Ok(format!("0x{:}", hex::encode(code)))
     }
 
     async fn call(&self, opts: CallOpts, block: BlockTag) -> Result<String, Error> {
-        let node = self.node.read().await;
-        let res = convert_err(node.call(&opts, block).await)?;
+        let res = self
+            .node
+            .call(&opts, block)
+            .await
+            .map_err(NodeError::to_json_rpsee_error)?;
 
         Ok(format!("0x{}", hex::encode(res)))
     }
 
     async fn estimate_gas(&self, opts: CallOpts) -> Result<String, Error> {
-        let node = self.node.read().await;
-        let gas = convert_err(node.estimate_gas(&opts).await)?;
+        let gas = self
+            .node
+            .estimate_gas(&opts)
+            .await
+            .map_err(NodeError::to_json_rpsee_error)?;
 
         Ok(u64_to_hex_string(gas))
     }
 
     async fn chain_id(&self) -> Result<String, Error> {
-        let node = self.node.read().await;
-        let id = node.chain_id();
+        let id = self.node.chain_id();
         Ok(u64_to_hex_string(id))
     }
 
     async fn gas_price(&self) -> Result<String, Error> {
-        let node = self.node.read().await;
-        let gas_price = convert_err(node.get_gas_price())?;
-        Ok(gas_price.encode_hex())
+        let gas_price = convert_err(self.node.get_gas_price().await)?;
+        Ok(format_hex(&gas_price))
     }
 
     async fn max_priority_fee_per_gas(&self) -> Result<String, Error> {
-        let node = self.node.read().await;
-        let tip = convert_err(node.get_priority_fee())?;
-        Ok(tip.encode_hex())
+        let tip = convert_err(self.node.get_priority_fee())?;
+        Ok(format_hex(&tip))
     }
 
     async fn block_number(&self) -> Result<String, Error> {
-        let node = self.node.read().await;
-        let num = convert_err(node.get_block_number())?;
-        Ok(u64_to_hex_string(num))
+        let num = convert_err(self.node.get_block_number().await)?;
+        Ok(u64_to_hex_string(num.as_u64()))
     }
 
     async fn get_block_by_number(
         &self,
         block: BlockTag,
         full_tx: bool,
-    ) -> Result<Option<ExecutionBlock>, Error> {
-        let node = self.node.read().await;
-        let block = convert_err(node.get_block_by_number(block, full_tx).await)?;
+    ) -> Result<Option<Block>, Error> {
+        let block = convert_err(self.node.get_block_by_number(block, full_tx).await)?;
         Ok(block)
     }
 
-    async fn get_block_by_hash(
-        &self,
-        hash: &str,
-        full_tx: bool,
-    ) -> Result<Option<ExecutionBlock>, Error> {
-        let hash = convert_err(hex_str_to_bytes(hash))?;
-        let node = self.node.read().await;
-        let block = convert_err(node.get_block_by_hash(&hash, full_tx).await)?;
+    async fn get_block_by_hash(&self, hash: H256, full_tx: bool) -> Result<Option<Block>, Error> {
+        let block = convert_err(self.node.get_block_by_hash(&hash, full_tx).await)?;
         Ok(block)
     }
 
     async fn send_raw_transaction(&self, bytes: &str) -> Result<String, Error> {
-        let node = self.node.read().await;
         let bytes = convert_err(hex_str_to_bytes(bytes))?;
-        let tx_hash = convert_err(node.send_raw_transaction(&bytes).await)?;
+        let tx_hash = convert_err(self.node.send_raw_transaction(&bytes).await)?;
         Ok(hex::encode(tx_hash))
     }
 
     async fn get_transaction_receipt(
         &self,
-        hash: &str,
+        hash: H256,
     ) -> Result<Option<TransactionReceipt>, Error> {
-        let node = self.node.read().await;
-        let hash = H256::from_slice(&convert_err(hex_str_to_bytes(hash))?);
-        let receipt = convert_err(node.get_transaction_receipt(&hash).await)?;
+        let receipt = convert_err(self.node.get_transaction_receipt(&hash).await)?;
         Ok(receipt)
     }
 
-    async fn get_transaction_by_hash(&self, hash: &str) -> Result<Option<Transaction>, Error> {
-        let node = self.node.read().await;
-        let hash = H256::from_slice(&convert_err(hex_str_to_bytes(hash))?);
-        convert_err(node.get_transaction_by_hash(&hash).await)
+    async fn get_transaction_by_hash(&self, hash: H256) -> Result<Option<Transaction>, Error> {
+        Ok(self.node.get_transaction_by_hash(&hash).await)
+    }
+
+    async fn get_transaction_by_block_hash_and_index(
+        &self,
+        hash: H256,
+        index: u64,
+    ) -> Result<Option<Transaction>, Error> {
+        Ok(self
+            .node
+            .get_transaction_by_block_hash_and_index(&hash, index)
+            .await)
+    }
+
+    async fn coinbase(&self) -> Result<Address, Error> {
+        convert_err(self.node.get_coinbase().await)
+    }
+
+    async fn syncing(&self) -> Result<SyncingStatus, Error> {
+        convert_err(self.node.syncing().await)
+    }
+
+    async fn get_logs(&self, filter: Filter) -> Result<Vec<Log>, Error> {
+        convert_err(self.node.get_logs(&filter).await)
+    }
+
+    async fn get_filter_changes(&self, filter_id: U256) -> Result<Vec<Log>, Error> {
+        convert_err(self.node.get_filter_changes(&filter_id).await)
+    }
+
+    async fn uninstall_filter(&self, filter_id: U256) -> Result<bool, Error> {
+        convert_err(self.node.uninstall_filter(&filter_id).await)
+    }
+
+    async fn get_new_filter(&self, filter: Filter) -> Result<U256, Error> {
+        convert_err(self.node.get_new_filter(&filter).await)
+    }
+
+    async fn get_new_block_filter(&self) -> Result<U256, Error> {
+        convert_err(self.node.get_new_block_filter().await)
+    }
+
+    async fn get_new_pending_transaction_filter(&self) -> Result<U256, Error> {
+        convert_err(self.node.get_new_pending_transaction_filter().await)
+    }
+
+    async fn get_storage_at(
+        &self,
+        address: &str,
+        slot: H256,
+        block: BlockTag,
+    ) -> Result<String, Error> {
+        let address = convert_err(Address::from_str(address))?;
+        let storage = convert_err(self.node.get_storage_at(&address, slot, block).await)?;
+
+        Ok(format_hex(&storage))
     }
 }
 
 #[async_trait]
 impl NetRpcServer for RpcInner {
     async fn version(&self) -> Result<String, Error> {
-        let node = self.node.read().await;
-        Ok(node.chain_id().to_string())
+        Ok(self.node.chain_id().to_string())
     }
 }
 
 async fn start(rpc: RpcInner) -> Result<(HttpServerHandle, SocketAddr)> {
-    let addr = format!("127.0.0.1:{}", rpc.port);
-    let server = HttpServerBuilder::default().build(addr).await?;
-
+    let server = HttpServerBuilder::default().build(rpc.address).await?;
     let addr = server.local_addr()?;
 
     let mut methods = Methods::new();
@@ -243,4 +331,21 @@ async fn start(rpc: RpcInner) -> Result<(HttpServerHandle, SocketAddr)> {
 
 fn convert_err<T, E: Display>(res: Result<T, E>) -> Result<T, Error> {
     res.map_err(|err| Error::Custom(err.to_string()))
+}
+
+fn format_hex(num: &U256) -> String {
+    let stripped = num
+        .encode_hex()
+        .strip_prefix("0x")
+        .unwrap()
+        .trim_start_matches('0')
+        .to_string();
+
+    let stripped = if stripped.is_empty() {
+        "0".to_string()
+    } else {
+        stripped
+    };
+
+    format!("0x{stripped}")
 }

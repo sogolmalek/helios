@@ -36,7 +36,9 @@ if [ "${ARCHITECTURE}" = "x86_64" ]; then
     ARCHITECTURE="amd64" # Intel.
   fi
 elif [ "${ARCHITECTURE}" = "arm64" ] ||[ "${ARCHITECTURE}" = "aarch64" ] ; then
-  ARCHITECTURE="arm64" # Arm.
+  ARCHITECTURE="arm64" # 64-bit Arm.
+elif [ "${ARCHITECTURE}" = "armv7l" ]; then
+  ARCHITECTURE="armv7l" # 32-bit Arm.
 else
   ARCHITECTURE="amd64" # Amd.
 fi
@@ -44,4 +46,4 @@ fi
 TARBALL_URL="https://github.com/$REPO/releases/download/${TAG}/${NAME}_${PLATFORM}_${ARCHITECTURE}.tar.gz"
 curl -L $TARBALL_URL | tar -xzC $BIN_DIR
 
-echo "Installed $NAME" 
+echo "Installed $NAME"

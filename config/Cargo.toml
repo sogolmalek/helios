@@ -1,18 +1,26 @@
 
 [package]
 name = "config"
-version = "0.1.0"
+version = "0.4.1"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-eyre = "0.6.8"
-serde = { version = "1.0.143", features = ["derive"] }
-hex = "0.4.3"
-ssz-rs = { git = "https://github.com/ralexstokes/ssz-rs", rev = "cb08f18ca919cc1b685b861d0fa9e2daabe89737" }
-ethers = "1.0.0"
+eyre.workspace = true
+serde.workspace = true
+hex.workspace = true
+ethers.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+backoff.workspace = true
+
 figment = { version = "0.10.7", features = ["toml", "env"] }
-thiserror = "1.0.37"
+serde_yaml = "0.9.14"
+strum = { version = "0.24.1", features = ["derive"] }
+structopt = "0.3.26"
 
 common = { path = "../common" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio.workspace = true

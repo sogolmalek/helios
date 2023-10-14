@@ -195,7 +195,7 @@ impl ClientBuilder {
         } else {
             self.strict_checkpoint_age
         };
-        
+
         let target_addresses: Option<Vec<Address>> = if self.target_addresses.is_some() {
             self.target_addresses
         } else if let Some(config) = &self.config {

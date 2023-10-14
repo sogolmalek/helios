@@ -81,7 +81,6 @@ where
             database,
         };
 
-
         Ok(storage)
     }
 

@@ -15,7 +15,7 @@ use common::utils::hex_str_to_bytes;
 use config::{CliConfig, Config};
 use dirs::home_dir;
 use ethers::{
-    core::types::{Address, Block, BlockId, Transaction, TransactionReceipt, H256},
+    core::types::{Address, Block, BlockId, Transaction, H256},
     providers::{Http, Middleware, Provider},
     // signers::Wallet,
     // trie::{MerklePatriciaTrie, Trie},
@@ -25,7 +25,7 @@ use tracing::{error, info};
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::FmtSubscriber;
 // use ethers::types::transaction;
-use eyre::{eyre, Result};
+use eyre::{Result};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -55,12 +55,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let addresses = transactions
         .iter()
-        .map(|tx| {
+        .flat_map(|tx| {
             let from = tx.from;
             let to = tx.to;
             vec![from, to.unwrap_or_default()]
         })
-        .flatten()
         .collect::<Vec<_>>();
     // Remove duplicate addresses
     let addresses_deduped = dedup(&addresses);
@@ -157,7 +156,7 @@ async fn fetch_block_data(provider: Provider<Http>, block_number: BlockId) -> Bl
     }
     // println!("block {:?}", block);
 
-    return block;
+    block
 }
 
 async fn fetch_all_transactions(
@@ -181,10 +180,10 @@ async fn fetch_all_transactions(
     }
     let transactions: Vec<Transaction> = block_with_txs.transactions;
 
-    return transactions;
+    transactions
 }
 
-fn dedup(vs: &Vec<Address>) -> Vec<Address> {
+fn dedup(vs: &[Address]) -> Vec<Address> {
     let hs = vs.iter().cloned().collect::<HashSet<Address>>();
 
     hs.into_iter().collect()

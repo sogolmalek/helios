@@ -1,29 +1,29 @@
+use std::collections::HashSet;
+use std::error::Error;
 use std::net::IpAddr;
+use std::process;
 use std::{
     path::PathBuf,
     process::exit,
     str::FromStr,
     sync::{Arc, Mutex},
 };
-use std::error::Error;
-use std::process;
-use std::collections::HashSet;
 
 use clap::Parser;
 use client::{Client, ClientBuilder};
 use common::utils::hex_str_to_bytes;
 use config::{CliConfig, Config};
 use dirs::home_dir;
-use futures::executor::block_on;
-use tracing::{error, info};
-use tracing_subscriber::filter::{EnvFilter, LevelFilter};
-use tracing_subscriber::FmtSubscriber;
 use ethers::{
-    core::types::{Block, BlockId, Transaction, TransactionReceipt, H256, Address},
+    core::types::{Address, Block, BlockId, Transaction, TransactionReceipt, H256},
     providers::{Http, Middleware, Provider},
     // signers::Wallet,
     // trie::{MerklePatriciaTrie, Trie},
 };
+use futures::executor::block_on;
+use tracing::{error, info};
+use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+use tracing_subscriber::FmtSubscriber;
 // use ethers::types::transaction;
 use eyre::{eyre, Result};
 
@@ -40,11 +40,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     tracing::subscriber::set_global_default(subscriber).expect("subsriber set failed");
 
-    let provider_url = std::env::var("GOERLI_EXECUTION_RPC").unwrap_or_else(|_| "http://127.0.0.1:8545".to_string());
+    let provider_url = std::env::var("GOERLI_EXECUTION_RPC")
+        .unwrap_or_else(|_| "http://127.0.0.1:8545".to_string());
     let provider = Provider::<Http>::try_from(provider_url)?;
     // tracing::debug!("provider {:#?}", provider);
     let block_number = 9751183.into(); // Replace with the desired block number
-    // Fetch all transactions within the specified block
+                                       // Fetch all transactions within the specified block
     let transactions = fetch_all_transactions(provider.clone(), block_number).await;
     tracing::info!("transactions {:#?}", transactions);
 
@@ -64,7 +65,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Remove duplicate addresses
     let addresses_deduped = dedup(&addresses);
     tracing::info!("addresses {:#?}", addresses_deduped);
-    
+
     let config = get_config();
 
     // Create the Helios client with the specified target addresses
@@ -148,18 +149,21 @@ async fn fetch_block_data(provider: Provider<Http>, block_number: BlockId) -> Bl
                 tracing::debug!("Received empty block");
                 process::exit(1);
             }
-        },
+        }
         Err(e) => {
             tracing::debug!("Unable to get block {:#?}", e);
             process::exit(1);
-        },
+        }
     }
     // println!("block {:?}", block);
 
     return block;
 }
 
-async fn fetch_all_transactions(provider: Provider<Http>, block_number: BlockId) -> Vec<Transaction> {
+async fn fetch_all_transactions(
+    provider: Provider<Http>,
+    block_number: BlockId,
+) -> Vec<Transaction> {
     let block_with_txs;
     match provider.get_block_with_txs(block_number).await {
         Ok(x) => {
@@ -169,11 +173,11 @@ async fn fetch_all_transactions(provider: Provider<Http>, block_number: BlockId)
                 tracing::debug!("Received empty block with transactions");
                 process::exit(1);
             }
-        },
+        }
         Err(e) => {
             tracing::debug!("Unable to get block with transactions {:#?}", e);
             process::exit(1);
-        },
+        }
     }
     let transactions: Vec<Transaction> = block_with_txs.transactions;
 

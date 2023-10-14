@@ -18,6 +18,7 @@ backoff.workspace = true
 figment = { version = "0.10.7", features = ["toml", "env"] }
 serde_yaml = "0.9.14"
 strum = { version = "0.24.1", features = ["derive"] }
+structopt = "0.3.26"
 
 common = { path = "../common" }
 

@@ -35,6 +35,7 @@ pub struct ClientBuilder {
     fallback: Option<String>,
     load_external_fallback: bool,
     strict_checkpoint_age: bool,
+    target_addresses: Option<Vec<Address>>,
 }
 
 impl ClientBuilder {
@@ -46,6 +47,17 @@ impl ClientBuilder {
         self.network = Some(network);
         self
     }
+
+    pub fn target_addresses(mut self, addresses: Vec<Address>) -> Self {
+        self.target_addresses = Some(addresses);
+        self
+    }
+
+    // pub fn target_addresses(mut self, addresses: Vec<String>) -> Result<Self, Box<dyn std::error::Error>> {
+    //     let addresses: Result<Vec<Address>, _> = addresses.into_iter().map(|s| Address::from_str(&s)).collect();
+    //     self.target_addresses = Some(addresses.unwrap());
+    //     Ok(self)
+    // }
 
     pub fn consensus_rpc(mut self, consensus_rpc: &str) -> Self {
         self.consensus_rpc = Some(consensus_rpc.to_string());
@@ -183,6 +195,14 @@ impl ClientBuilder {
         } else {
             self.strict_checkpoint_age
         };
+        
+        let target_addresses: Option<Vec<Address>> = if self.target_addresses.is_some() {
+            self.target_addresses
+        } else if let Some(config) = &self.config {
+            config.target_addresses.clone()
+        } else {
+            None
+        };
 
         let config = Config {
             consensus_rpc,
@@ -207,6 +227,7 @@ impl ClientBuilder {
             fallback,
             load_external_fallback,
             strict_checkpoint_age,
+            target_addresses,
         };
 
         Client::new(config)
@@ -217,6 +238,7 @@ pub struct Client {
     node: Arc<Node>,
     #[cfg(not(target_arch = "wasm32"))]
     rpc: Option<Rpc>,
+    target_addresses: Vec<Address>, // New field for target addresses
 }
 
 impl Client {
@@ -235,6 +257,7 @@ impl Client {
             node,
             #[cfg(not(target_arch = "wasm32"))]
             rpc,
+            target_addresses: config.target_addresses.clone().unwrap_or_default(),
         })
     }
 
@@ -248,9 +271,9 @@ impl Client {
     }
 
     pub async fn shutdown(&self) {
-        info!(target: "helios::client","shutting down");
+        info!("shutting down");
         if let Err(err) = self.node.consensus.shutdown() {
-            warn!(target: "helios::client", error = %err, "graceful shutdown failed");
+            warn!("graceful shutdown failed: {}", err);
         }
     }
 
@@ -307,7 +330,15 @@ impl Client {
     }
 
     pub async fn get_logs(&self, filter: &Filter) -> Result<Vec<Log>> {
-        self.node.get_logs(filter).await
+        let logs = self.node.get_logs(filter).await?;
+
+        // Filter logs that match the target addresses
+        let target_logs: Vec<Log> = logs
+            .into_iter()
+            .filter(|log| self.target_addresses.contains(&log.address))
+            .collect();
+
+        Ok(target_logs)
     }
 
     pub async fn get_filter_changes(&self, filter_id: &U256) -> Result<bool> {

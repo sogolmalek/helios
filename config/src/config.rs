@@ -3,6 +3,7 @@ use crate::cli::CliConfig;
 use crate::types::{ChainConfig, Forks};
 use crate::utils::{bytes_deserialize, bytes_opt_deserialize};
 use crate::Network;
+use ethers::prelude::Address;
 use figment::{
     providers::{Format, Serialized, Toml},
     Figment,
@@ -30,6 +31,7 @@ pub struct Config {
     pub fallback: Option<String>,
     pub load_external_fallback: bool,
     pub strict_checkpoint_age: bool,
+    pub target_addresses: Option<Vec<Address>>,
 }
 
 impl Config {

@@ -16,6 +16,7 @@ members = [
     "consensus",
     "execution",
     "helios-ts",
+    "partial_view",
 ]
 
 default-members = ["cli"]
@@ -68,6 +69,7 @@ config = { path = "./config" }
 common = { path = "./common" }
 consensus = { path = "./consensus" }
 execution = { path = "./execution" }
+partial_view = {path = "./partial_view"}
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
